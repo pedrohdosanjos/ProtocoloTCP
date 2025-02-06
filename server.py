@@ -1,129 +1,84 @@
 import socket
 import threading
-import hashlib
 import os
 
-# Configurações do servidor: definimos o endereço e a porta para conexão.
-# REQUISITO: Escolher uma porta maior que 1024.
-HOST = "127.0.0.1"  # Endereço localhost
-PORT = 12345  # Porta para conexão, maior que 1024.
+HOST = "127.0.0.1"
+PORT = 12345
 
-
-# Função para calcular o hash SHA-256 de um arquivo.
-# REQUISITO: Calcular o hash (SHA) do arquivo enviado para verificar integridade.
-def calcular_hash(filepath):
-    sha256 = hashlib.sha256()  # Utiliza a função de hash SHA-256.
-    with open(filepath, "rb") as f:
-        # Lê o arquivo em chunks para evitar problemas com arquivos grandes (>10MB).
-        for chunk in iter(lambda: f.read(4096), b""):
-            sha256.update(chunk)
-    return sha256.hexdigest()  # Retorna o hash hexadecimal.
-
-
-# Função para tratar cada cliente.
-# REQUISITO: Criar uma thread para lidar com cada cliente conectado.
+# Função para lidar com cada cliente
 def handle_client(conn, addr):
-    print(f"Cliente conectado: {addr}")  # Confirma a conexão do cliente.
+    print(f"Conexão estabelecida com {addr}")
     try:
-        while True:
-            # Recebe dados do cliente.
-            data = conn.recv(1024).decode()  # Limite de 1024 bytes por vez.
-            if (
-                not data or data.lower() == "sair"
-            ):  # REQUISITO: Tratar o comando "Sair".
-                print(f"Cliente {addr} desconectado.")  # Mensagem ao servidor.
-                break  # Finaliza a thread.
-
-            elif data.startswith("Arquivo"):
-                # REQUISITO: Tratar a requisição de envio de arquivos.
-                # O cliente solicita um arquivo no formato "Arquivo <NOME.EXT>".
-
-                # Extrai o nome do arquivo solicitado.
-                _, filename = data.split(" ", 1)
-                if os.path.exists(filename):  # Verifica se o arquivo existe.
-                    filesize = os.path.getsize(filename)  # Obtém o tamanho do arquivo.
-                    filehash = calcular_hash(filename)  # Calcula o hash SHA-256.
-
-                    # REQUISITO: Enviar o protocolo definido.
-                    # Cabeçalho: <NOME_DO_ARQUIVO>|<TAMANHO>|<HASH>|<STATUS>.
-                    conn.send(f"{filename}|{filesize}|{filehash}|ok".encode())
-
-                    # Envia os dados do arquivo em chunks de 4096 bytes.
-                    with open(filename, "rb") as f:
-                        while chunk := f.read(4096):
-                            conn.send(chunk)
-                    print(f"Arquivo '{filename}' enviado para {addr}.")
-                else:
-                    # Caso o arquivo não exista, envia uma mensagem de erro.
-                    conn.send(
-                        "Erro|Arquivo inexistente.".encode()
-                    )  # REQUISITO: Tratar arquivo inexistente.
-
-            elif data.lower() == "chat":
-                # REQUISITO: Implementar a funcionalidade de chat.
-                print(f"Cliente {addr} entrou no modo Chat.")
-
-                # Função para receber mensagens do cliente em tempo real.
-                def receber_mensagens():
-                    while True:
-                        try:
-                            msg = conn.recv(
-                                1024
-                            ).decode()  # Recebe mensagem do cliente.
-                            if msg.lower() == "sair":  # Cliente encerra o chat.
-                                print(f"Cliente {addr} encerrou o chat.")
-                                break
-                            print(
-                                f"Cliente {addr} diz: {msg}"
-                            )  # Imprime mensagem no servidor.
-                        except:
-                            break
-
-                # Thread para gerenciar mensagens recebidas do cliente.
-                thread_receber = threading.Thread(target=receber_mensagens)
-                thread_receber.start()
-
-                # Servidor envia mensagens para o cliente.
-                while True:
-                    try:
-                        mensagem = input("")  # Entrada do servidor.
-                        conn.send(mensagem.encode())  # Envia ao cliente.
-                        if mensagem.lower() == "sair":  # Servidor encerra o chat.
-                            print(f"Chat com cliente {addr} encerrado.")
-                            break
-                    except:
-                        break
+        request = conn.recv(1024).decode()
+        if not request:
+            return
+        
+        # Pega a primeira linha da requisição (GET /arquivo.html HTTP/1.0)
+        request_line = request.split("\n")[0]
+        print(f"Requisição recebida: {request_line}")
+        
+        # Extrai o caminho do arquivo solicitado
+        parts = request_line.split()
+        if len(parts) < 2:
+            return
+        filepath = parts[1].lstrip("/")  # Remove a barra inicial
+        
+        # Define "index.html" como padrão
+        if filepath == "":
+            filepath = "index.html"
+        
+        # Verifica se o arquivo existe
+        if os.path.exists(filepath) and os.path.isfile(filepath):
+            with open(filepath, "rb") as f:
+                content = f.read()
+            
+            # Determina o tipo de conteúdo
+            if filepath.endswith(".html"):
+                content_type = "text/html"
+            elif filepath.endswith(".jpeg") or filepath.endswith(".jpg"):
+                content_type = "image/jpeg"
             else:
-                # Resposta para comandos inválidos.
-                conn.send("Comando inválido.".encode())
+                content_type = "application/octet-stream"
+            
+            # Monta a resposta HTTP 200
+            response = (
+                f"HTTP/1.1 200 OK\r\n"
+                f"Content-Type: {content_type}\r\n"
+                f"Content-Length: {len(content)}\r\n"
+                f"Connection: close\r\n\r\n"
+            ).encode() + content
+        else:
+            # Responde com 404 Not Found
+            response = (
+                "HTTP/1.1 404 Not Found\r\n"
+                "Content-Type: text/html\r\n"
+                "Connection: close\r\n\r\n"
+                "<html><body><h1>404 Not Found</h1></body></html>"
+            ).encode()
+        
+        conn.sendall(response)
     except Exception as e:
-        print(f"Erro com o cliente {addr}: {e}")  # Exibe erros no servidor.
+        print(f"Erro ao processar requisição de {addr}: {e}")
     finally:
-        conn.close()  # Fecha a conexão ao finalizar a thread.
+        conn.close()
 
-
-# Função principal para iniciar o servidor.
-# REQUISITO: Aceitar conexões de 2 clientes simultaneamente.
+# Inicia o servidor
 def start_server():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # Criação do socket TCP.
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Reutilizar a porta.
-    server.bind((HOST, PORT))  # Associa o endereço e a porta.
-    server.listen(2)  # Permite até 2 conexões simultâneas.
-    print(f"Servidor rodando em {HOST}:{PORT}...")
-
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((HOST, PORT))
+    server.listen(5)  # Permite até 5 conexões simultâneas
+    print(f"Servidor HTTP rodando em http://{HOST}:{PORT}")
+    
     try:
         while True:
-            # Aguarda por conexões de clientes.
-            conn, addr = server.accept()  # Aceita conexão.
-            # Cria uma thread para atender cada cliente.
+            conn, addr = server.accept()
             thread = threading.Thread(target=handle_client, args=(conn, addr))
             thread.start()
     except KeyboardInterrupt:
-        print("Servidor encerrado.")  # Permite finalizar com Ctrl+C.
-        return 0
+        print("Servidor encerrado.")
     finally:
-        server.close()  # Fecha o socket ao encerrar.
-
+        server.close()
 
 if __name__ == "__main__":
     start_server()
